@@ -10,6 +10,7 @@ from dateutil.parser import parse
 import random
 import torrent_parser as tp
 import unicodedata
+import pickle
 
 
 class Rarbg:
@@ -33,6 +34,7 @@ class Rarbg:
         self.retries = max_retries
         self.s = requests.Session()
         self.s.headers.update(self.headers)
+        self.cookie_file = "./cookies.txt"
         self.proxies = []
         self.proxy_index = 0
         self.delay = 0.1
@@ -108,6 +110,11 @@ class Rarbg:
         image = cv2.imdecode(arr, -1)
         results = pytesseract.image_to_string(image).rstrip()
         self.s.get(self.url + "/threat_defence.php?defence=2&sk="+value_sk+"&cid="+value_c+"&i="+value_i+"&ref_cookie=rarbgto.org&r="+captcha_r+"&solve_string="+results+"&captcha_id="+captcha_id+"&submitted_bot_captcha=1")
+        try: #Try to save the cookies we got back so we don't have to renew again until they expire.
+            with open(self.cookie_file, 'wb') as f:
+                pickle.dump(self.s.cookies, f)
+        except Exception as e:
+            print("Could not save cookies to file")
 
     def get(self, *args, **kwargs) -> str:
         return self.get_resp(*args, **kwargs).text
@@ -115,6 +122,11 @@ class Rarbg:
     def get_resp(self, url: str, params: dict = {}, attempts: int = 0) -> requests.Response:
         if attempts == self.retries:
             raise LookupError("Maximum Retries Reached")
+        try: # Let's see if we have valid cookies from a previous session that we can re-use.
+            with open(self.cookie_file, 'rb') as f:
+                self.s.cookies.update(pickle.load(f))
+        except Exception as e:
+            print("No cookiee file yet")
         resp = self.s.get(self.url + url, params=params)
         # print(resp.status_code)
         if "Please wait while we try to verify your browser..." in resp.text \
