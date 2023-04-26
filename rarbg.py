@@ -7,66 +7,100 @@ import cv2
 import numpy as np
 from typing import Optional
 from dateutil.parser import parse
-import random
 import torrent_parser as tp
 import unicodedata
+import random
+from expiringdict import ExpiringDict
+
+
+class IPBanException(Exception):
+    def __init__(self, message):
+        self.message = message
+
+    def __str__(self):
+        return self.message
+
+
+def convert_size(size) -> float:
+    if "kb" in size.lower():
+        return float(size.split(" ")[0]) * 1000
+    elif "mb" in size.lower():
+        return float(size.split(" ")[0]) * 1000000
+    elif "gb" in size.lower():
+        return float(size.split(" ")[0]) * 1000000000
+    else:
+        return float(0)
 
 
 class Rarbg:
     def __init__(self,
                  useragent: str = '"Google Chrome";v="107", "Chromium";v="107", "Not=A?Brand";v="24"',
-                 max_retries: int = 10,
+                 max_retries: int = 25,
                  proxies: Optional[str] = None
-                ):
+                 ):
+        self.ipbans = ExpiringDict(max_len=10000, max_age_seconds=60 * 60 * 2)
         self.url: str = "https://rarbgto.org"
         self.headers: dict = {"sec-ch-ua": useragent,
-                        "sec-ch-ua-mobile":"?0",
-                        "sec-ch-ua-platform":"Windows",
-                        "Upgrade-Insecure-Requests":"1",
-                        "User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.0.0 Safari/537.36",
-                        "Accept":"text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9",
-                        "Sec-Fetch-Site":"same-origin",
-                        "Sec-Fetch-Mode":"navigate",
-                        "Sec-Fetch-Dest":"document",
-                        "host":"rarbgto.org"
-                       }
+                              "sec-ch-ua-mobile": "?0",
+                              "sec-ch-ua-platform": "Windows",
+                              "Upgrade-Insecure-Requests": "1",
+                              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                                            "(KHTML, like Gecko) Chrome/112.0.0.0 Safari/537.36",
+                              "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,"
+                                        "image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9",
+                              "Sec-Fetch-Site": "same-origin",
+                              "Sec-Fetch-Mode": "navigate",
+                              "Sec-Fetch-Dest": "document",
+                         #     "host": "rarbgto.org"
+                              }
         self.retries = max_retries
         self.s = requests.Session()
         self.s.headers.update(self.headers)
         self.proxies = []
-        self.proxy_index = 0
         self.delay = 0.1
         if proxies:
-            self.delay = 0
             with open(proxies, "r") as f:
                 for line in f.readlines():
                     data = line.rstrip().split(":")
                     self.proxies.append(f"{data[2]}:{data[3]}@{data[0]}:{data[1]}")
-        random.shuffle(self.proxies)
         self.next_proxy()
-    
+
+    def tvdb_to_imdb(self, tvdb: str):
+        url = "http://www.thetvdb.com/?tab=series&id=" + tvdb
+        resp = self.s.get(url)
+        # <span><a href="https://www.imdb.com/title/tt8111088/">IMDB</a></span>
+        for line in resp.text.splitlines():
+            if "imdb" in line:
+                return line.split('href="')[1].split('">')[0].replace("https://www.imdb.com/title/", "")\
+                    .replace("/", "")
+
     def next_proxy(self):
-        if self.delay != 0:
-            return
-        if self.proxy_index >= len(self.proxies):
-            self.proxy_index = 0
-        proxy = self.proxies[self.proxy_index]
-        self.proxy_index += 1
-        self.s.proxies = {
-            'http': 'http://'+proxy,
-            'https': 'http://'+proxy,
-            }
+        random.shuffle(self.proxies)
+        for proxy in self.proxies:
+            if proxy.split("@")[1] not in self.ipbans:
+                self.s.proxies = {
+                    'http': 'http://' + proxy,
+                    'https': 'http://' + proxy,
+                }
+                return
+        exit("No proxies left, all ips banned")
 
+    def ban_proxy(self):
+        print(self.s.proxies)
+        self.ipbans[self.s.proxies["https"].split("@")[1]] = True
 
-    def renew_session(self):
+    def renew_session(self, next_proxy=False):
         """
         Renew session
         """
         print("Renewing session")
+        if next_proxy:
+            self.ban_proxy()
+        print(self.ipbans.keys())
         self.s = requests.Session()
         self.s.headers.update(self.headers)
         self.next_proxy()
-        date = datetime.now() + timedelta(days=7) # Wed, 30 Nov 2022 20:38:54 GMT
+        date = datetime.now() + timedelta(days=7)  # Wed, 30 Nov 2022 20:38:54 GMT
         date = date.strftime("%a, %d %b %Y %H:%M:%S GMT")
         r1 = self.s.get('https://rarbgto.org/threat_defence.php')
         soup1 = BeautifulSoup(r1.text, 'html.parser')
@@ -76,19 +110,25 @@ class Rarbg:
             script = script.text
             if "value_sk" in script:
                 data = script
-        value_sk  = data.split("value_sk = '")[1].split("'")[0]
-        value_c   = data.split("value_c = '")[1].split("'")[0]
-        value_i   = data.split("value_i = '")[1].split("'")[0]
+        value_sk = data.split("value_sk = '")[1].split("'")[0]
+        value_c = data.split("value_c = '")[1].split("'")[0]
+        value_i = data.split("value_i = '")[1].split("'")[0]
         value_r_1 = data.split("value_i+'&r=")[1].split("'")[0]
         value_r_2 = data.split("""&ref_cookie="+ref_cookie+"&r=""")[1].split('"')[0]
-        cookies = { "sk": ";expires=" + date +";path=/;domain=.rarbgto.org" }
+        cookies = {"sk": ";expires=" + date + ";path=/;domain=.rarbgto.org"}
         self.s.cookies.update(cookies)
-        requests.get(self.url + f"/threat_defence_ajax.php?sk={value_sk}&cid={value_c}&i={value_i}&r={value_r_1}", headers={'Content-type': 'text/plain'})
+        requests.get(self.url + f"/threat_defence_ajax.php?sk={value_sk}&cid={value_c}&i={value_i}&r={value_r_1}",
+                     headers={'Content-type': 'text/plain'})
         time.sleep(4)
-        r2 = self.s.get(self.url + "/threat_defence.php?defence=2&sk="+value_sk+"&cid="+value_c+"&i="+value_i+"&ref_cookie=rarbgto.org&r="+value_r_2)
+        try:
+            r2 = self.s.get(
+                self.url + "/threat_defence.php?defence=2&sk=" + value_sk + "&cid=" + value_c + "&i=" + value_i + "&ref_cookie=rarbgto.org&r=" + value_r_2)
+        except requests.exceptions.ProxyError:
+            self.renew_session(next_proxy=True)
+            return
         soup2 = BeautifulSoup(r2.text, 'html.parser')
         captcha_id = soup2.find('input', {'name': 'captcha_id'})["value"]
-        captcha_r  = soup2.find('input', {'name': 'r'})["value"]
+        captcha_r = soup2.find('input', {'name': 'r'})["value"]
 
         captcha_img = ""
         imgs = soup2.findAll('img')
@@ -98,45 +138,47 @@ class Rarbg:
                 break
         r3 = self.s.get(captcha_img)
         arr = np.asarray(bytearray(r3.content), dtype=np.uint8)
-    
+
         # Providing the tesseract executable
         # location to pytesseract library
         pytesseract.tesseract_cmd = "/usr/bin/tesseract"
-        
+
         # Passing the image object to image_to_string() function
         # This function will extract the text from the image
         image = cv2.imdecode(arr, -1)
         results = pytesseract.image_to_string(image).rstrip()
-        self.s.get(self.url + "/threat_defence.php?defence=2&sk="+value_sk+"&cid="+value_c+"&i="+value_i+"&ref_cookie=rarbgto.org&r="+captcha_r+"&solve_string="+results+"&captcha_id="+captcha_id+"&submitted_bot_captcha=1")
+        self.s.get(
+            self.url + "/threat_defence.php?defence=2&sk=" + value_sk + "&cid=" + value_c + "&i=" + value_i +
+            "&ref_cookie=rarbgto.org&r=" + captcha_r + "&solve_string=" + results + "&captcha_id=" +
+            captcha_id + "&submitted_bot_captcha=1")
 
     def get(self, *args, **kwargs) -> str:
         return self.get_resp(*args, **kwargs).text
 
-    def get_resp(self, url: str, params: dict = {}, attempts: int = 0) -> requests.Response:
+    def get_resp(self, url: str, params=None, attempts: int = 0) -> requests.Response:
+        if params is None:
+            params = {}
         if attempts == self.retries:
             raise LookupError("Maximum Retries Reached")
         resp = self.s.get(self.url + url, params=params)
         # print(resp.status_code)
-        if "Please wait while we try to verify your browser..." in resp.text \
-          or "pure flooding so you are limited to downloading only using magnets" in resp.text:
+        if "Please wait while we try to verify your browser..." in resp.text:
             self.renew_session()
-            return self.get_resp(url, params, attempts+1)
+            print("verify")
+            return self.get_resp(url, params, attempts + 1)
+        elif "pure flooding so you are limited to downloading only using magnets" in resp.text \
+                or "We have too many requests from your ip in the past 24h." in resp.text:
+            print("banned")
+
+            print(resp.text)
+            self.renew_session(next_proxy=True)
+            return self.get_resp(url, params, attempts + 1)
         else:
             return resp
 
     def get_content(self, *args, **kwargs) -> bytes:
         return self.get_resp(*args, **kwargs).content
 
-    def convert_size(self, size) -> float:
-        if "kb" in size.lower():
-            return float(size.split(" ")[0]) * 1000
-        elif "mb" in size.lower():
-            return float(size.split(" ")[0]) * 1000000
-        elif "gb" in size.lower():
-            return float(size.split(" ")[0]) * 1000000000
-        else:
-            return float(0)
-    
     def search(self, search: str, categories: list[int] = [], page: int = 1, attempts: int = 0) -> list["Torrent"]:
         """
         Search torrents on RARBG
@@ -152,7 +194,7 @@ class Rarbg:
             torrents.append(Torrent(
                 indexer=self,
                 name=items[1].find('a').text,
-                size=self.convert_size(items[3].text),
+                size=convert_size(items[3].text),
                 seeders=int(items[4].text),
                 leechers=int(items[5].text),
                 date=parse(items[2].text),
@@ -161,7 +203,8 @@ class Rarbg:
         time.sleep(self.delay)
         return torrents
 
-    def search_all(self, search: str, categories: list[int] = [], before: Optional[datetime] = None, after: Optional[datetime] = None, limit: int = 9999999) -> list["Torrent"]:
+    def search_all(self, search: str, categories: list[int] = [], before: Optional[datetime] = None,
+                   after: Optional[datetime] = None, limit: int = 9999999) -> list["Torrent"]:
         """
         Search all pages for torrents
         """
@@ -175,7 +218,7 @@ class Rarbg:
             results = self.search(search, categories, page)
             if len(results) == 0:
                 break
-            
+
             for torrent in results:
                 if len(torrents) >= limit:
                     return torrents
@@ -190,6 +233,7 @@ class Rarbg:
             page += 1
         return torrents
 
+
 class Torrent:
     def __init__(self,
                  indexer: "Rarbg",
@@ -201,13 +245,13 @@ class Torrent:
                  id: str):
         self.indexer = indexer
         self.name: str = name
-        self.size: float = size # Size in bytes
+        self.size: float = size  # Size in bytes
         self.seeders: int = seeders
-        self.leechers: int  = leechers
+        self.leechers: int = leechers
         self.date: datetime = date
         self.id: str = id
         self.page = None
-    
+
     def __getattr__(self, name):
         if name == "magnet":
             self.magnet = self.get_magnet()
@@ -226,13 +270,13 @@ class Torrent:
                 return self[name]
             except KeyError:
                 raise AttributeError(f"'Torrent' object has no attribute '{name}'")
-    
+
     def get_magnet(self) -> str:
         """
         Get magnet link for torrent
         """
         if not self.page:
-            self.page = self.indexer.get("/torrent/"+self.id)
+            self.page = self.indexer.get("/torrent/" + self.id)
         soup = BeautifulSoup(self.page, "html.parser")
         magnet = soup.select_one("a[href^=magnet]")
         return magnet["href"]
@@ -242,7 +286,7 @@ class Torrent:
         Get torrent url for torrent
         """
         if not self.page:
-            self.page = self.indexer.get("/torrent/"+self.id)
+            self.page = self.indexer.get("/torrent/" + self.id)
         soup = BeautifulSoup(self.page, "html.parser")
         torrent_url = soup.select_one('a[href^="/download.php"]')
         if full:
@@ -261,7 +305,7 @@ class Torrent:
         Get files in torrent
         """
         if not self.page:
-            self.page = self.indexer.get("/torrent/"+self.id)
+            self.page = self.indexer.get("/torrent/" + self.id)
         soup = BeautifulSoup(self.page, "html.parser")
         rows = soup.select("div#files table.lista tr")
         files = []
@@ -275,9 +319,9 @@ class Torrent:
             })
         if len(files) == 0:
             try:
-                files = [ {"path": x["path"], "size": x["length"]} for x in self.data["info"]["files"] ]
+                files = [{"path": x["path"], "size": x["length"]} for x in self.data["info"]["files"]]
             except KeyError:
-                files = [ {"path": [self.data["info"]["name"]], "size": self.data["info"]["length"]} ]
+                files = [{"path": [self.data["info"]["name"]], "size": self.data["info"]["length"]}]
         return sorted(files, key=lambda d: d['size'], reverse=True)
 
     def __getitem__(self, key):
