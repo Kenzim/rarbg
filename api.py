@@ -1,15 +1,19 @@
 from flask import Flask, request
-import json
 from rarbg import Rarbg
+import os
 
+proxies = os.getenv("PROXIES", None)
+retries = os.getenv("RETRIES", 10)
 
 app = Flask(__name__)
-rg = Rarbg(proxies="/media/scripts/proxies.txt")
+rg = Rarbg(proxies=proxies, max_retries=retries)
 
 
-def rg_search(search="", limit=25, sort="last", categories=[]):
+def rg_search(search="", limit=25, sort="last", categories=None):
+    if categories is None:
+        categories = []
     torrents = rg.search_all(search=search, limit=limit, categories=categories)
-    data = {"torrent_results": []}
+    data: dict = {"torrent_results": []}
     for torrent in torrents:
         data["torrent_results"].append({"title": torrent.name,
                                         "download": torrent.get_magnet(),
@@ -19,6 +23,12 @@ def rg_search(search="", limit=25, sort="last", categories=[]):
                                         "pubdate": "2023-04-12 10:14:09 +0000",
                                         "ranked": 1,
                                         "info_page": ""})
+    if sort == "last":
+        data["torrent_results"] = sorted(data["torrent_results"], key=lambda k: k["pubdate"], reverse=True)
+    elif sort == "seeders":
+        data["torrent_results"] = sorted(data["torrent_results"], key=lambda k: k["seeders"], reverse=True)
+    elif sort == "leechers":
+        data["torrent_results"] = sorted(data["torrent_results"], key=lambda k: k["leechers"], reverse=True)
     return data
 
 
@@ -46,8 +56,14 @@ def hello_world():
             data = rg_search(limit=limit, sort=sort, categories=cgs)
         elif request.args.get("mode") == "search":
             if request.args.get("search_tvdb"):
+                search = request.args.get("search_string", "", type=str) + " " + rg.tvdb_to_imdb(
+                    request.args.get("search_tvdb", "", type=str))
+            elif request.args.get("search_themoviedb"):
+                search = request.args.get("search_string", "", type=str) + " " + rg.themoviedb_to_imdb(
+                    request.args.get("search_themoviedb", "", type=str))
+            elif request.args.get("search_imdb"):
                 search = request.args.get("search_string", "", type=str) + " " + \
-                         rg.tvdb_to_imdb(request.args.get("search_tvdb", "", type=str))
+                         request.args.get("search_imdb", "", type=str)
             else:
                 search = request.args.get("search_string", "", type=str)
             data = rg_search(search=search, limit=limit, sort=sort, categories=cgs)
@@ -60,4 +76,4 @@ def hello_world():
 
 
 if __name__ == "__main__":
-    app.run(host="192.168.10.2", port=8099, debug=True)  # http://192.168.10.2:8099
+    app.run(host="0.0.0.0", port=8080)

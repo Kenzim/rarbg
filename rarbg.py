@@ -34,13 +34,12 @@ def convert_size(size) -> float:
 
 class Rarbg:
     def __init__(self,
-                 useragent: str = '"Google Chrome";v="107", "Chromium";v="107", "Not=A?Brand";v="24"',
                  max_retries: int = 25,
                  proxies: Optional[str] = None
                  ):
         self.ipbans = ExpiringDict(max_len=10000, max_age_seconds=60 * 60 * 2)
         self.url: str = "https://rarbgto.org"
-        self.headers: dict = {"sec-ch-ua": useragent,
+        self.headers: dict = {"sec-ch-ua": '"Google Chrome";v="107", "Chromium";v="107", "Not=A?Brand";v="24"',
                               "sec-ch-ua-mobile": "?0",
                               "sec-ch-ua-platform": "Windows",
                               "Upgrade-Insecure-Requests": "1",
@@ -51,7 +50,6 @@ class Rarbg:
                               "Sec-Fetch-Site": "same-origin",
                               "Sec-Fetch-Mode": "navigate",
                               "Sec-Fetch-Dest": "document",
-                         #     "host": "rarbgto.org"
                               }
         self.retries = max_retries
         self.s = requests.Session()
@@ -59,6 +57,7 @@ class Rarbg:
         self.proxies = []
         self.delay = 0.1
         if proxies:
+            print("Loading proxies from {}".format(proxies))
             with open(proxies, "r") as f:
                 for line in f.readlines():
                     data = line.rstrip().split(":")
@@ -74,19 +73,26 @@ class Rarbg:
                 return line.split('href="')[1].split('">')[0].replace("https://www.imdb.com/title/", "")\
                     .replace("/", "")
 
+    def themoviedb_to_imdb(self, tmdb: str):
+        url = f"https://api.themoviedb.org/3/movie/{tmdb}" \
+              "?api_key=8d6d91941230817f7807d643736e8a49&append_to_response=external_ids"
+        # random guy's api key from stackoverflow lol
+        resp = self.s.get(url).json()
+        return resp["external_ids"]["imdb_id"]
+
     def next_proxy(self):
-        random.shuffle(self.proxies)
-        for proxy in self.proxies:
-            if proxy.split("@")[1] not in self.ipbans:
-                self.s.proxies = {
-                    'http': 'http://' + proxy,
-                    'https': 'http://' + proxy,
-                }
-                return
-        exit("No proxies left, all ips banned")
+        if self.proxies:
+            random.shuffle(self.proxies)
+            for proxy in self.proxies:
+                if proxy.split("@")[1] not in self.ipbans:
+                    self.s.proxies = {
+                        'http': 'http://' + proxy,
+                        'https': 'http://' + proxy,
+                    }
+                    return
+            exit("No proxies left, all ips banned")
 
     def ban_proxy(self):
-        print(self.s.proxies)
         self.ipbans[self.s.proxies["https"].split("@")[1]] = True
 
     def renew_session(self, next_proxy=False):
@@ -96,13 +102,13 @@ class Rarbg:
         print("Renewing session")
         if next_proxy:
             self.ban_proxy()
-        print(self.ipbans.keys())
         self.s = requests.Session()
         self.s.headers.update(self.headers)
         self.next_proxy()
         date = datetime.now() + timedelta(days=7)  # Wed, 30 Nov 2022 20:38:54 GMT
         date = date.strftime("%a, %d %b %Y %H:%M:%S GMT")
         r1 = self.s.get('https://rarbgto.org/threat_defence.php')
+
         soup1 = BeautifulSoup(r1.text, 'html.parser')
         scripts = soup1.findAll("script")
         data: str = ""
@@ -117,12 +123,13 @@ class Rarbg:
         value_r_2 = data.split("""&ref_cookie="+ref_cookie+"&r=""")[1].split('"')[0]
         cookies = {"sk": ";expires=" + date + ";path=/;domain=.rarbgto.org"}
         self.s.cookies.update(cookies)
-        requests.get(self.url + f"/threat_defence_ajax.php?sk={value_sk}&cid={value_c}&i={value_i}&r={value_r_1}",
+        self.s.get(self.url + f"/threat_defence_ajax.php?sk={value_sk}&cid={value_c}&i={value_i}&r={value_r_1}",
                      headers={'Content-type': 'text/plain'})
         time.sleep(4)
         try:
             r2 = self.s.get(
-                self.url + "/threat_defence.php?defence=2&sk=" + value_sk + "&cid=" + value_c + "&i=" + value_i + "&ref_cookie=rarbgto.org&r=" + value_r_2)
+                self.url + "/threat_defence.php?defence=2&sk=" + value_sk + "&cid=" + value_c + "&i=" + value_i +
+                "&ref_cookie=rarbgto.org&r=" + value_r_2)
         except requests.exceptions.ProxyError:
             self.renew_session(next_proxy=True)
             return
@@ -164,13 +171,9 @@ class Rarbg:
         # print(resp.status_code)
         if "Please wait while we try to verify your browser..." in resp.text:
             self.renew_session()
-            print("verify")
             return self.get_resp(url, params, attempts + 1)
         elif "pure flooding so you are limited to downloading only using magnets" in resp.text \
                 or "We have too many requests from your ip in the past 24h." in resp.text:
-            print("banned")
-
-            print(resp.text)
             self.renew_session(next_proxy=True)
             return self.get_resp(url, params, attempts + 1)
         else:
@@ -179,11 +182,13 @@ class Rarbg:
     def get_content(self, *args, **kwargs) -> bytes:
         return self.get_resp(*args, **kwargs).content
 
-    def search(self, search: str, categories: list[int] = [], page: int = 1, attempts: int = 0) -> list["Torrent"]:
+    def search(self, search: str, categories=None, page: int = 1) -> list["Torrent"]:
         """
         Search torrents on RARBG
         Returns list of Torrent objects
         """
+        if categories is None:
+            categories = []
         torrents: list[Torrent] = []
         params = {"search": search, "category[]": categories, "page": page}
         data = self.get("/torrents.php", params=params)
@@ -198,16 +203,18 @@ class Rarbg:
                 seeders=int(items[4].text),
                 leechers=int(items[5].text),
                 date=parse(items[2].text),
-                id=items[1].find('a')['href'].split("/")[-1]
+                _id=items[1].find('a')['href'].split("/")[-1]
             ))
         time.sleep(self.delay)
         return torrents
 
-    def search_all(self, search: str, categories: list[int] = [], before: Optional[datetime] = None,
+    def search_all(self, search: str, categories=None, before: Optional[datetime] = None,
                    after: Optional[datetime] = None, limit: int = 9999999) -> list["Torrent"]:
         """
         Search all pages for torrents
         """
+        if categories is None:
+            categories = []
         if not before:
             before = datetime.now()
         if not after:
@@ -242,14 +249,14 @@ class Torrent:
                  seeders: int,
                  leechers: int,
                  date: datetime,
-                 id: str):
+                 _id: str):
         self.indexer = indexer
         self.name: str = name
         self.size: float = size  # Size in bytes
         self.seeders: int = seeders
         self.leechers: int = leechers
         self.date: datetime = date
-        self.id: str = id
+        self.id: str = _id
         self.page = None
 
     def __getattr__(self, name):
@@ -300,7 +307,7 @@ class Torrent:
         """
         return self.indexer.get_content(self.get_torrent_url(full=False))
 
-    def get_files(self) -> list[str]:
+    def get_files(self) -> list[dict]:
         """
         Get files in torrent
         """
@@ -315,7 +322,7 @@ class Torrent:
                 continue
             files.append({
                 "path": unicodedata.normalize("NFKD", items[0].text).strip().split("/"),
-                "size": self.indexer.convert_size(items[1].text.strip())
+                "size": convert_size(items[1].text.strip())
             })
         if len(files) == 0:
             try:
@@ -328,4 +335,5 @@ class Torrent:
         return self.data[key]
 
     def __str__(self):
-        return f"Name: {self.name} Size: {self.size} Seeders: {self.seeders} Leechers: {self.leechers} Date: {self.date} ID: {self.id}"
+        return f"Name: {self.name} Size: {self.size} Seeders: {self.seeders} Leechers: {self.leechers} " \
+               f": {self.date} ID: {self.id}"
